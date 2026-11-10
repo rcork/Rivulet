@@ -4,10 +4,33 @@
 import SwiftUI
 
 /// The iOS release notes. Keyed "<CFBundleShortVersionString> (<CFBundleVersion>)", newest
-/// first; CI takes the build number from the `ios-vX.Y.Z-<build>` tag, so the key must match it.
+/// first; CI takes the build number from the shared `vX.Y.Z-<build>` tag, so the key must match it.
 /// A line starting with "## " is a heading; any other line is a bullet.
 enum IOSChangelog {
     static let entries: [(version: String, lines: [String])] = [
+        ("1.3.0 (125)", [
+            "Photos, with favorites, slideshows, photo info, a map and a memories row",
+            "Improved search to find more matches, genres, and people",
+            "Cast and crew on a title open their page, with their movies and shows",
+            "Subtitle search in the player. Jellyfin and Emby should work (please test)",
+            "Plex home profiles now see their own watchlist",
+            "Hide libraries from Home in Settings > Library",
+            "Direct Play buffers as far ahead as storage allows",
+            "Added delete option in more long press menus",
+        ]),
+        ("1.0.7 (87)", [
+            "On a Dolby Vision display, Profile 7 FEL keeps most of its enhancement layer",
+            "Play from several Plex servers at once",
+            "Filter libraries by genre, decade or unwatched. @DennisR-git",
+            "A title's page shows its ratings and Rotten Tomatoes critic reviews",
+            "Move subtitles up or down, even into the black bars",
+            "Movies split into several files play straight through",
+            "A show's page includes the extras for the season you pick",
+            "A new At the Credits setting chooses what shows when credits start",
+            "Jellyfin trickplay previews show while you scrub",
+            "Updated AetherEngine to 7.61.0",
+            "Other small changes and fixes",
+        ]),
         ("1.0.7 (85)", [
             "Jellyfin and Emby: sign in, browse, play, download and watch Live TV",
             "Libraries open on a Recommended page with a hero",

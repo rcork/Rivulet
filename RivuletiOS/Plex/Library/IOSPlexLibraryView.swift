@@ -36,8 +36,8 @@ struct IOSPlexLibrarySplitView: View {
             }
         }
         // Side by side, the detail column is never left empty.
-        .onChange(of: [sizeClass == .regular, browse.libraries.isEmpty], initial: true) {
-            if sizeClass == .regular, selection == nil, let first = browse.libraries.first {
+        .onChange(of: [sizeClass == .regular, browse.shownLibraries.isEmpty], initial: true) {
+            if sizeClass == .regular, selection == nil, let first = browse.shownLibraries.first {
                 selection = .library(first)
             }
         }
@@ -52,7 +52,7 @@ struct IOSPlexLibrarySplitView: View {
         switch selection {
         case .downloads: IOSDownloadsView()
         case .favorites: IOSFavoritesView()
-        case .library(let library): IOSPlexLibraryView(library: library)
+        case .library(let library): IOSLibraryPage(library: library)
         case .playlists(let providerID): IOSPlexPlaylistsView(providerID: providerID)
         case nil: ContentUnavailableView("Choose a Library", systemImage: "rectangle.stack")
         }
@@ -95,7 +95,7 @@ struct IOSPlexLibrariesView: View {
                             Section(group.name ?? "") {
                                 ForEach(group.libraries) { library in
                                     NavigationLink(value: IOSLibrarySelection.library(library)) {
-                                        Label(library.title, systemImage: library.icon)
+                                        Label(library.title, systemImage: library.iosIcon)
                                     }
                                 }
                                 if showPlaylists, !browse.playlists(providerID: group.providerID).isEmpty {
@@ -122,7 +122,7 @@ struct IOSPlexLibrariesView: View {
         }
     }
 
-    private var videoLibraries: [MediaLibrary] { browse.libraries }
+    private var videoLibraries: [MediaLibrary] { browse.shownLibraries }
 
     /// One section per server, under its name once there are several.
     private var serverGroups: [(id: String, providerID: String, name: String?, libraries: [MediaLibrary])] {
@@ -267,7 +267,8 @@ private struct IOSPlexLibraryBrowseView: View {
     @EnvironmentObject private var browse: BrowseStore
     @Environment(\.plexActions) private var actions
     @AppStorage private var sortRaw: String
-    @State private var unwatchedOnly = false
+    @State private var filter = LibraryFilter.none
+    @State private var filterOptions = LibraryFilterOptions()
     /// Every item's place, filled page by page as the grid scrolls, so the
     /// scroll length is the library's from the first page.
     @State private var slots = PagedSlots<MediaItem>(pageSize: Self.pageSize)
@@ -301,7 +302,17 @@ private struct IOSPlexLibraryBrowseView: View {
     }
 
     private var sort: LibrarySortOption { LibrarySortOption(rawValue: sortRaw) ?? .titleAsc }
-    private var queryKey: String { "\(sortRaw)|\(unwatchedOnly)" }
+    private var queryKey: String { "\(sortRaw)|\(filter)" }
+    private var unwatchedOnly: Bool { filter.unwatchedOnly }
+    /// Genre and Decade apply to movie and TV libraries only.
+    private var offersGenreAndDecade: Bool { library.kind == .movies || library.kind == .shows }
+    private var genreSelection: Binding<String> {
+        Binding(get: { filter.genre?.id ?? "" },
+                set: { id in filter.genre = filterOptions.genres.first { $0.id == id } })
+    }
+    private var decadeSelection: Binding<Int> {
+        Binding(get: { filter.decade ?? 0 }, set: { filter.decade = $0 == 0 ? nil : $0 })
+    }
 
     var body: some View {
         Group {
@@ -347,15 +358,33 @@ private struct IOSPlexLibraryBrowseView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Picker("Show", selection: $unwatchedOnly) {
+                    Picker("Show", selection: $filter.unwatchedOnly) {
                         Text("All").tag(false)
                         Text("Unwatched").tag(true)
+                    }
+                    if offersGenreAndDecade {
+                        if !filterOptions.genres.isEmpty {
+                            Picker("Genre", selection: genreSelection) {
+                                Text("All").tag("")
+                                ForEach(filterOptions.genres, id: \.id) { Text(verbatim: $0.name).tag($0.id) }
+                            }
+                        }
+                        if !filterOptions.decades.isEmpty {
+                            Picker("Decade", selection: decadeSelection) {
+                                Text("All").tag(0)
+                                ForEach(filterOptions.decades, id: \.self) { Text(verbatim: LibraryFilter.decadeTitle($0)).tag($0) }
+                            }
+                        }
                     }
                 } label: {
                     Label("Filter", systemImage: "line.3.horizontal.decrease")
                 }
-                .tint(unwatchedOnly ? .accentColor : nil)
+                .tint(filter.isActive ? .accentColor : nil)
             }
+        }
+        .task(id: library.id) {
+            guard offersGenreAndDecade, let provider = browse.provider(for: library.providerID) else { return }
+            filterOptions = (try? await provider.filterOptions(in: library)) ?? LibraryFilterOptions()
         }
         .task(id: "\(queryKey)|\(browse.watchStateRevision)") {
             // Nothing claimed and nothing shown: a first page that was cancelled when the view left.
@@ -400,7 +429,7 @@ private struct IOSPlexLibraryBrowseView: View {
         do {
             guard let provider = browse.provider(for: library.providerID) else { throw MediaProviderError.unreachable }
             let page = try await provider.items(
-                in: library, sort: sort.seamSort, unwatchedOnly: unwatchedOnly, page: Page(offset: start, limit: Self.pageSize)
+                in: library, sort: sort.seamSort, filter: filter, page: Page(offset: start, limit: Self.pageSize)
             )
             guard query == queryKey else { return }
             slots.fill(page.items, at: start, total: page.total)

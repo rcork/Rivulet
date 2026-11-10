@@ -1357,6 +1357,7 @@ class PlayerContainerViewController: UIViewController {
             .sink { [weak vm] _ in
                 Task { await vm?.loadInsightsCast() }
                 Task { await vm?.loadInsightsTrivia() }
+                Task { await vm?.refreshSubtitleSearchAvailability() }
             }
             .store(in: &cancellables)
 
@@ -1386,7 +1387,7 @@ class PlayerContainerViewController: UIViewController {
             let list = CardTrackListView.subtitleMenu(
                     tracks: vm.subtitleMenuTracks,
                     selectedTrackId: vm.currentSubtitleTrackId, onTrackId: vm.subtitleOnTrackId,
-                    actions: vm.canSearchSubtitles ? [
+                    actions: vm.subtitleSearchAvailable ? [
                         CardActionConfig(title: String(localized: "Search for Subtitles")) { [weak self] row in
                             self?.searchSubtitles(from: row)
                         },
@@ -1480,6 +1481,24 @@ class PlayerContainerViewController: UIViewController {
                 }),
                 width: CardTrackListView.menuWidth, from: rail.filterButton)
         }
+        // Speed: AVKit's set, the current pick checked.
+        rail.setSpeedAvailable(true)
+        rail.onSpeed = { [weak self] in
+            guard let self, let vm = self.viewModel else { return }
+            let rows = UniversalPlayerViewModel.playbackSpeeds.enumerated().map { index, speed in
+                CardTrackListView.Row(
+                    title: speed.formatted(.number.precision(.fractionLength(0...2))) + "x",
+                    subtitle: nil, trackId: index, isSelected: speed == vm.playbackSpeed)
+            }
+            self.presentRailPanel(
+                content: CardTrackListView(header: String(localized: "Speed"), rows: rows, onSelect: { [weak vm, weak self] index in
+                    if let index, UniversalPlayerViewModel.playbackSpeeds.indices.contains(index) {
+                        vm?.setPlaybackSpeed(UniversalPlayerViewModel.playbackSpeeds[index])
+                    }
+                    self?.activeRailPanel?.dismissPanel()
+                }),
+                width: CardTrackListView.menuWidth, from: rail.speedButton)
+        }
         // Quality: every choice, the session's pick checked; Auto says what it is playing.
         rail.setQualityAvailable(true)
         rail.onQuality = { [weak self] in
@@ -1559,13 +1578,8 @@ class PlayerContainerViewController: UIViewController {
                 ? [CardTrackListView.Row(title: results == nil ? String(localized: "Search Failed") : String(localized: "No Subtitles Found"),
                                          subtitle: nil, trackId: nil, isSelected: false)]
                 : found.enumerated().map { index, result in
-                    CardTrackListView.Row(
-                        title: result.title ?? result.displayTitle ?? String(localized: "Subtitle"),
-                        subtitle: [result.language, result.codec?.uppercased(),
-                                   result.hearingImpaired == true ? "SDH" : nil,
-                                   result.forced == true ? String(localized: "Forced") : nil]
-                            .compactMap { $0 }.joined(separator: " • "),
-                        trackId: index, isSelected: false)
+                    CardTrackListView.Row(title: result.displayTitle, subtitle: result.detail,
+                                          trackId: index, isSelected: false)
                 }
             _ = self.presentRailPanel(
                 content: CardTrackListView(header: String(localized: "Search Results"), rows: rows, onSelect: { [weak vm, weak self] index in
@@ -1786,6 +1800,7 @@ class PlayerContainerViewController: UIViewController {
             let details = PlayerDetailsPaneView(
                 media: PlayerDetailsPaneView.mediaSections(metadata: vm.metadata, modes: vm.streamingModeInfo,
                                                            dolbyVision: vm.aetherPlayer?.dolbyVisionPlayback,
+                                                           enhancementLayer: vm.aetherPlayer?.dolbyVisionEnhancementLayer,
                                                            enhanceDialogue: SystemAudioAdjustment.dialogueSummary,
                                                            upscale: vm.aetherPlayer?.upscaleSummary),
                 statsProvider: statsProvider)

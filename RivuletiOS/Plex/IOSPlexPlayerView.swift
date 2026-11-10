@@ -125,7 +125,8 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
             headers: request.headers,
             startTime: request.startTime,
             externalSubtitles: request.sidecarSubtitles,
-            keepingTransport: keepingTransport
+            keepingTransport: keepingTransport,
+            stackedParts: request.stackedParts
         )
         if player.audioIsDropped { fallBackToTranscode() }
     }
@@ -206,7 +207,7 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
     }
 
     private func stepDown() {
-        guard let step = QualityDecision.stepDown(from: request.plan, sourceKbps: request.sourceKbps) else { return }
+        guard !request.isStacked, let step = QualityDecision.stepDown(from: request.plan, sourceKbps: request.sourceKbps) else { return }
         stallTracker.noteStepDown()
         print("[Quality] Stalling, stepping down to \(step.label)")
         reload(quality: .auto, plan: .transcode(step))
@@ -214,7 +215,7 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
 
     /// A direct-play file that never starts gets one retry as a transcode, as on tvOS.
     private func fallBackToTranscode() {
-        guard !hasPlayed, !didFallBack, request.plan == .original, !request.isLocal else { return }
+        guard !hasPlayed, !didFallBack, request.plan == .original, !request.isLocal, !request.isStacked else { return }
         didFallBack = true
         let kbps = request.quality == .auto
             ? QualityDecision.capKbps(setting: .auto, measuredKbps: request.measuredKbps, isRelay: false) ?? 8000
@@ -229,10 +230,13 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
 
     /// The Plex part whose BIF is held, released when the item changes or playback ends.
     private var thumbnailPartID: Int?
+    /// Jellyfin trickplay for a provider item, tried before engine frames.
+    private let providerPreviews = ScrubPreviewHolder()
 
     /// The still for a scrub position: the server's BIF, loaded on the first scrub, else
     /// a frame decoded from the file. A transcode has no file to decode from.
     func scrubStill(at time: Double) async -> UIImage? {
+        if let still = await providerPreviews.image(at: time, for: request.providerPlayback) { return UIImage(cgImage: still) }
         let parts = request.item.Media.flatMap { $0.indices.contains(request.mediaIndex) ? $0[request.mediaIndex] : nil }?.Part
         if !request.isLocal, !request.serverURL.isEmpty, parts?.count == 1, let partID = parts?.first?.id,
            !PlexThumbnailService.shared.isUnavailable(partId: partID) {
@@ -247,6 +251,7 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
     }
 
     private func releaseThumbnails() {
+        providerPreviews.clear()
         if let thumbnailPartID { PlexThumbnailService.shared.clearCache(partId: thumbnailPartID) }
         thumbnailPartID = nil
     }
@@ -338,6 +343,59 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
     }
 
     private var plexStreams: [PlexStream] { request.item.Media?.first?.Part?.first?.Stream ?? [] }
+
+    // MARK: - Subtitle search
+
+    /// Whether the Subtitles menu offers a search: the server's rights and providers decide.
+    @Published private(set) var subtitleSearchAvailable = false
+
+    func refreshSubtitleSearch() async {
+        let id = request.id
+        let available = await request.subtitleSearch?.isAvailable() ?? false
+        if id == request.id { subtitleSearchAvailable = available }
+    }
+
+    func makeSubtitleSearch() -> SubtitleSearchModel {
+        SubtitleSearchModel(
+            search: { [weak self] in
+                guard let search = self?.request.subtitleSearch else { return [] }
+                let language = SubtitleSearchLanguage.alpha2(
+                    preferred: TrackIntentStore.effectiveSubtitleIntent.language, device: TrackLanguage.device)
+                return try await search.search(language: language)
+            },
+            install: { [weak self] in await self?.installSubtitle($0) ?? false })
+    }
+
+    /// Downloads a result, waits for the server to list it, then reloads at the playhead with it on.
+    private func installSubtitle(_ result: SubtitleSearchResult) async -> Bool {
+        let previous = request
+        guard let search = previous.subtitleSearch else { return false }
+        let known = Set(plexStreams.filter(\.isSubtitle).map(\.id))
+        let time = player.pendingSeekTarget ?? player.currentTime
+        let audio = isTranscoding ? chosenAudioID : enginePicksAsPlexIDs().audio
+        do {
+            try await search.download(result)
+            guard let (next, id) = try await plex.requestWithNewSubtitle(previous, known: known, at: time),
+                  !Task.isCancelled else { return false }
+            let picks = TrackPicks(audio: audio, subtitle: .track(id))
+            if next.plan != .original { await plex.selectStream(picks, in: next) }
+            if let stream = next.item.Media?.first?.Part?.first?.Stream?.first(where: { $0.id == id }) {
+                TrackIntentStore.subtitleIntent = .afterPick(
+                    MediaTrack(from: stream), replacing: TrackIntentStore.effectiveSubtitleIntent,
+                    audioLanguage: mediaAudio.first { $0.id == selectedAudioID }.flatMap { $0.languageCode ?? $0.language })
+            }
+            reloadTask?.cancel()
+            subtitlesPickedOff = false
+            if let audio { chosenAudioID = audio }
+            chosenSubtitle = .track(id)
+            Task { await plex.stopTranscode(previous) }
+            request = next
+            await load(keepingTransport: true)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     /// The engine's playing tracks as server stream ids, joined as `TrackMerge` joins them.
     private func enginePicksAsPlexIDs() -> TrackPicks {
@@ -583,8 +641,11 @@ final class IOSPlexPlayback: ObservableObject, IOSPlaybackSession {
 
     // MARK: - Up Next
 
-    /// Near the end: inside the credits marker, or the last 30 s.
+    /// Near the end: inside the credits marker, or the last 30 s. Only "Up Next" opens it early;
+    /// the other choices wait for the end of the file.
     var isNearEnd: Bool {
+        if player.state == .ended { return true }
+        guard CreditsBehavior.current().showsUpNextAtCredits else { return false }
         if activeMarker?.type == "credits" { return true }
         let duration = player.duration
         return duration > 60 && player.currentTime >= duration - 30
@@ -680,6 +741,7 @@ private struct IOSPlexPlayerScreen: View {
     @State private var captionStyle = CaptionAppearance.current()
     @State private var showsPlaylist = false
     @State private var showsChapters = false
+    @State private var subtitleSearch: SubtitleSearchModel?
 
     var body: some View {
         let item = session.request.item
@@ -718,6 +780,7 @@ private struct IOSPlexPlayerScreen: View {
                 selectQuality: session.switchQuality,
                 selectAudio: session.selectAudio,
                 selectSubtitle: session.selectSubtitle,
+                searchSubtitles: session.subtitleSearchAvailable ? { subtitleSearch = session.makeSubtitleSearch() } : nil,
                 stepAudioDelay: player.stepAudioDelay,
                 pictureInPicture: controller.startPictureInPicture,
                 toggleMute: { player.setMuted(!player.isMuted) },
@@ -760,6 +823,10 @@ private struct IOSPlexPlayerScreen: View {
         .sheet(isPresented: $showsChapters) {
             IOSPlayerChaptersPane(session: session, currentTime: player.currentTime)
         }
+        .sheet(item: $subtitleSearch) { model in
+            IOSSubtitleSearchPane(model: model)
+        }
+        .task(id: session.request.id) { await session.refreshSubtitleSearch() }
         .sheet(isPresented: $showsPlaylist) {
             if let queue = session.queue {
                 IOSPlayerPlaylistPane(queue: queue) { index in
