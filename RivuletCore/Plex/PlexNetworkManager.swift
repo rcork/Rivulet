@@ -2194,18 +2194,26 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
               let general = container["generalDecisionCode"] else { return nil }
         let transcode = container["transcodeDecisionCode"].map { "\($0)" } ?? "none"
         let text = container["transcodeDecisionText"] ?? container["generalDecisionText"] ?? ""
+        let streams = decisionStreams(in: container)
         return PlexTranscodeDecision(
             verdict: "general=\(general) transcode=\(transcode): \(text)" + streamDecisions(in: container),
             refusal: ServerRefusal.decision(
                 general: general as? Int, generalText: container["generalDecisionText"] as? String,
                 transcode: container["transcodeDecisionCode"] as? Int,
-                transcodeText: container["transcodeDecisionText"] as? String))
+                transcodeText: container["transcodeDecisionText"] as? String),
+            video: streams?.first(where: { $0["streamType"] as? Int == 1 })?["decision"] as? String,
+            audio: streams?.first(where: { $0["streamType"] as? Int == 2 })?["decision"] as? String)
+    }
+
+    private nonisolated static func decisionStreams(in container: [String: Any]) -> [[String: Any]]? {
+        let media = ((container["Metadata"] as? [[String: Any]])?.first?["Media"] as? [[String: Any]])?.first
+        return (media?["Part"] as? [[String: Any]])?.first?["Stream"] as? [[String: Any]]
     }
 
     /// " [video copy hevc 4K, audio transcode aac]": whether the session copies or re-encodes.
     private nonisolated static func streamDecisions(in container: [String: Any]) -> String {
         guard let media = ((container["Metadata"] as? [[String: Any]])?.first?["Media"] as? [[String: Any]])?.first,
-              let streams = (media["Part"] as? [[String: Any]])?.first?["Stream"] as? [[String: Any]] else { return "" }
+              let streams = decisionStreams(in: container) else { return "" }
         let parts = [(1, "video"), (2, "audio")].compactMap { type, name -> String? in
             guard let stream = streams.first(where: { $0["streamType"] as? Int == type }) else { return nil }
             let words = [name, stream["decision"] as? String ?? "?", stream["codec"] as? String,
@@ -3547,6 +3555,9 @@ nonisolated struct PlexTranscodeDecision: Sendable {
     let verdict: String
     /// Set when the server says no (decision 2xxx); nil when it would play it.
     let refusal: ServerRefusal?
+    /// What the session does with each stream: "copy" or "transcode"; nil when the reply names none.
+    var video: String? = nil
+    var audio: String? = nil
 }
 
 /// A running transcode as `/transcode/sessions` reports it.

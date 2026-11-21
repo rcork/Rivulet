@@ -932,7 +932,8 @@ final class PlayerDetailsPaneView: UIView {
                               dolbyVision: DolbyVisionPlayback? = nil,
                               enhancementLayer: DolbyVisionLayerType? = nil,
                               enhanceDialogue: String? = nil,
-                              upscale: String? = nil) -> [Section] {
+                              upscale: String? = nil,
+                              transcodeBitrate: Int? = nil) -> [Section] {
         let media = metadata.Media?.first
         let streams = media?.Part?.first?.Stream ?? []
         var sections: [Section] = []
@@ -963,9 +964,16 @@ final class PlayerDetailsPaneView: UIView {
             }
             if let frameRate = media.videoFrameRate { video.append(Row(label: String(localized: "Frame Rate"), value: frameRate)) }
             if let upscale { video.append(Row(label: String(localized: "Upscaling"), value: upscale)) }
-            // Plex reports kbps; the formatter takes bits/sec.
+            // Plex reports the file's rate in kbps; the formatter and `transcodeBitrate` are bits/sec.
+            // A transcode names the file's rate Original and adds the rate the stream is sent at.
+            let transcoding = modes.video == .transcode
             if let bitrate = media.bitrate {
-                video.append(Row(label: String(localized: "Bitrate"), value: PlayerInfoSheetStyle.bitrate(bitrate * 1000)))
+                video.append(Row(label: transcoding ? String(localized: "Original Bitrate") : String(localized: "Bitrate"),
+                                 value: PlayerInfoSheetStyle.bitrate(bitrate * 1000)))
+            }
+            if transcoding, let transcodeBitrate {
+                video.append(Row(label: String(localized: "Transcoded Bitrate"),
+                                 value: PlayerInfoSheetStyle.bitrate(transcodeBitrate)))
             }
         }
         sections.append(Section(title: String(localized: "VIDEO"), rows: video))

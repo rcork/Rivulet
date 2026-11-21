@@ -608,6 +608,8 @@ final class UniversalPlayerViewModel: ObservableObject, WatchTogetherPlayer {
     private var transcodeStartWatch: Task<Void, Never>?
     /// The master playlist the last HLS preflight found ready, for the panel mode (#677).
     private var preflightMaster: String?
+    /// The server's decision for the running transcode: what Details reports on the hls route.
+    private var transcodeDecision: PlexTranscodeDecision?
     /// The current AVPlayer item has played since it loaded.
     private var avItemHasPlayed = false
     /// The Plex stream whose transcode subtitle feeds the caption overlay (hls route).
@@ -1602,11 +1604,40 @@ final class UniversalPlayerViewModel: ObservableObject, WatchTogetherPlayer {
                 subtitles: .directPlay
             )
         }
+        // The server's own decision first: a quality below Original re-encodes video the file
+        // could have streamed as is, and Plex's dashboard calls that a transcode.
         return StreamingModeInfo(
-            video: ContentRouter.requiresVideoTranscode(metadata: metadata) ? .transcode : .directStream,
-            audio: Self.isAudioDirectStreamCapable(metadata) ? .directStream : .transcode,
+            video: Self.deliveryMode(transcodeDecision?.video)
+                ?? (ContentRouter.requiresVideoTranscode(metadata: metadata) ? .transcode : .directStream),
+            audio: Self.deliveryMode(transcodeDecision?.audio)
+                ?? (Self.isAudioDirectStreamCapable(metadata) ? .directStream : .transcode),
             subtitles: .directPlay
         )
+    }
+
+    /// What a re-encoded stream is sent at, in bits per second: the transcode playlist's BANDWIDTH.
+    /// Nil unless the video is transcoded, where the file's own bitrate is no longer what plays.
+    var transcodeBitrate: Int? {
+        guard streamingModeInfo.video == .transcode, let master = preflightMaster else { return nil }
+        return Self.streamBandwidth(masterPlaylist: master)
+    }
+
+    /// The first variant's BANDWIDTH; nil when absent or a placeholder under 100 kbps.
+    nonisolated static func streamBandwidth(masterPlaylist: String) -> Int? {
+        guard let line = masterPlaylist.split(separator: "\n").first(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }),
+              let match = line.range(of: #"(?<![A-Z-])BANDWIDTH=\d+"#, options: .regularExpression),
+              let bandwidth = Int(line[match].dropFirst("BANDWIDTH=".count)),
+              bandwidth >= 100_000 else { return nil }
+        return bandwidth
+    }
+
+    /// A transcode decision's stream verdict as Details shows it; nil for anything else.
+    nonisolated static func deliveryMode(_ decision: String?) -> StreamingModeInfo.Mode? {
+        switch decision {
+        case "copy": .directStream
+        case "transcode": .transcode
+        default: nil
+        }
     }
 
     /// Check if the current audio output is AirPlay.
@@ -3988,8 +4019,10 @@ final class UniversalPlayerViewModel: ObservableObject, WatchTogetherPlayer {
         let url = avPlayerURL(url)
         serverRefusal = nil
         preflightMaster = nil
+        transcodeDecision = nil
         if let decision = await PlexNetworkManager.shared.startTranscodeDecision(hlsURL: url, headers: headers) {
             diagnostics.step("transcode_decision", detail: decision.verdict)
+            transcodeDecision = decision
             if let refusal = decision.refusal {
                 serverRefusal = refusal
                 // The server says no, so polling for a transcode only waits.
